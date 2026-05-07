@@ -1,0 +1,12 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "mugua-ai",
+  "outputfilename": "mugua-ai",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "author": {
+    "name": "MuGuua",
+    "email": "100008421+MuGuua@users.noreply.github.com"
+  }
+}

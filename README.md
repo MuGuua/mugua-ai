@@ -1,3 +1,47 @@
 # mugua-ai
-ai生成app
-1111
+
+一个基于 Go + Wails + Preact + TypeScript + Vite 的跨平台桌面应用项目，目标先覆盖 macOS 与 Windows 双端。
+
+## 当前业务架构
+
+- Go：承载桌面端后端逻辑与 Wails 绑定能力
+- Wails：负责桌面应用壳与原生窗口管理
+- Preact + TypeScript + Vite：负责前端页面与交互实现
+
+## 最新变更记录
+
+### 2026-05-07
+
+- 初始化 Wails 桌面应用骨架
+- 新增 Preact + TypeScript + Vite 前端工程
+- 完成首版登录页面 UI，支持基础表单交互与响应式布局
+- 安装 `Wails CLI v2.10.1`，支持本地执行 `wails` 命令
+- 已按 `用户接口.md` 对接 `POST /api/open/token` 登录接口
+- Go 侧 `Login` 方法改为真实调用远端服务，前端展示登录结果
+- 新增本地会话持久化与恢复能力，支持记住登录状态和退出登录
+- 启动恢复时会调用 `GET /api/open/me` 校验本地 Token，并同步最新用户信息
+- 新增 `POST /api/open/refresh`、`POST /api/open/logout`、`POST /api/open/register`
+- 新增 `POST /api/open/email-code/send`、`POST /api/open/email/register`、`POST /api/open/email/token`
+- 登录成功后进入桌面首页框架，包含侧边栏、顶栏和内容区占位模块
+- 首页模块已细化为总览、空间、会话、账号 4 个真实面板
+- 认证侧新增验证码倒计时、表单错误提示、退出回登录动画、自动刷新 Token
+
+## 任务总结
+
+本次实现先聚焦最小可运行闭环：
+
+- 桌面端采用 Wails 作为应用容器
+- 前端完成登录页首屏视觉与交互骨架
+- 登录流程改为 `Preact -> Wails -> Go -> 远端登录接口`
+- 已补齐账号密码登录、邮箱验证码登录、账号注册、邮箱验证码注册
+- 已补齐会话刷新、退出登录、本地恢复与服务端校验
+- 登录成功后自动切到桌面首页框架，作为后续业务模块承载页
+- 记住登录开启时，登录结果会保存到本地配置目录并在启动时恢复
+- 不额外引入状态管理、路由、接口层等非必要能力
+- 为后续账号体系、接口联调与多页面扩展保留清晰入口
+
+## 开发说明
+
+- 默认登录服务地址：`http://touwomugua.cn`
+- 如需切换环境，可启动前设置：`MUGUA_API_BASE_URL=http://your-host`
+- 桌面开发命令：`wails dev`
