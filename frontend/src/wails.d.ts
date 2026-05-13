@@ -48,6 +48,39 @@ type WailsBaseResponse = {
   } | null;
 };
 
+type WailsChatContentBlock = {
+  type: string;
+  text?: string;
+  thinking?: string;
+  signature?: string;
+  id?: string;
+  name?: string;
+  input?: unknown;
+};
+
+type WailsChatMessage = {
+  role: 'user' | 'assistant';
+  content: WailsChatContentBlock[];
+};
+
+type WailsChatResponse = {
+  id?: string;
+  type?: string;
+  role?: string;
+  model?: string;
+  content: WailsChatContentBlock[];
+  stop_reason?: string;
+  stop_sequence?: string;
+};
+
+type WailsChatConversation = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: WailsChatMessage[];
+};
+
 declare global {
   interface Window {
     go?: {
@@ -79,6 +112,12 @@ declare global {
           Logout: () => Promise<WailsBaseResponse>;
           ClearSession: () => Promise<void>;
           GetDefaultClientID: () => Promise<string>;
+          GetDefaultLLMModel: () => Promise<string>;
+          Chat: (messages: WailsChatMessage[], systemPrompt: string) => Promise<WailsChatResponse>;
+          StartChatStream: (requestId: string, messages: WailsChatMessage[], systemPrompt: string) => Promise<void>;
+          StopChatStream: (requestId: string) => Promise<void>;
+          LoadChatConversations: () => Promise<WailsChatConversation[]>;
+          SaveChatConversations: (conversations: WailsChatConversation[]) => Promise<void>;
         };
       };
     };

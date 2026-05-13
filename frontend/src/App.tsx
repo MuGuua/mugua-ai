@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import authBackground from '../../asset/yafz80bo0l.png';
+import { marked } from 'marked';
+import { EventsOn } from '../wailsjs/runtime/runtime';
+import loginBackground from '../../asset/yafz80bo0l.png';
 
 type SubmitState = 'idle' | 'submitting' | 'success' | 'error';
-type AuthView = 'password' | 'emailCode' | 'register' | 'emailRegister';
-type HomeView = 'overview' | 'workspace' | 'tokens' | 'account';
-type CodeScene = 'login' | 'register';
+type WorkspacePage = 'chat' | 'library' | 'plugins' | 'settings';
+type LoginMode = 'password' | 'otp';
+type ChatRole = 'user' | 'assistant';
 
 type User = {
   userId?: string;
@@ -32,43 +34,50 @@ type LoginResponse = {
   data?: LoginData | null;
 };
 
-type RegisterResponse = {
-  code: number;
-  msg: string;
-  uuid: string;
-  data?: {
-    userId?: string;
-    account?: string;
-    displayName?: string;
-    status?: string;
-    createdAt?: string;
-  } | null;
+type ChatContentBlock = {
+  type: string;
+  text?: string;
+  thinking?: string;
+  signature?: string;
+  id?: string;
+  name?: string;
+  input?: unknown;
+  content?: string;
 };
 
-type BaseResponse = {
-  code: number;
-  msg: string;
-  uuid: string;
-  data?: {
-    message?: string;
-  } | null;
+type ChatMessage = {
+  role: ChatRole;
+  content: ChatContentBlock[];
 };
 
-type ValidationErrors = Partial<Record<string, string>>;
+type ChatResponse = {
+  id?: string;
+  type?: string;
+  role?: string;
+  model?: string;
+  content: ChatContentBlock[];
+  stop_reason?: string;
+  stop_sequence?: string;
+};
 
-const authViews: Array<{ key: AuthView; label: string }> = [
-  { key: 'password', label: '登录' },
-  { key: 'emailCode', label: '验证码' },
-  { key: 'register', label: '注册' },
-  { key: 'emailRegister', label: '邮箱' },
-];
+type ChatConversation = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: ChatMessage[];
+};
 
-const sidebarItems: Array<{ key: HomeView; label: string; hint: string }> = [
-  { key: 'overview', label: '总览', hint: '工作台状态' },
-  { key: 'workspace', label: '空间', hint: '项目与流程' },
-  { key: 'tokens', label: '会话', hint: 'Token 与刷新' },
-  { key: 'account', label: '账号', hint: '身份与安全' },
-];
+type ChatStreamChunkPayload = {
+  requestId: string;
+  index: number;
+  block: ChatContentBlock;
+};
+
+type ChatStreamCompletePayload = {
+  requestId: string;
+  response: ChatResponse;
+};
 
 const runtimeApp = () => {
   const app = window.go?.main?.App;
@@ -78,85 +87,337 @@ const runtimeApp = () => {
   return app;
 };
 
-const shortToken = (value?: string) => {
-  if (!value) {
-    return '未返回';
+const promptCards = [
+  {
+    title: '高层简报',
+    category: '战略',
+    desc: '用于高层决策摘要、季度复盘和战略更新。',
+  },
+  {
+    title: '技术评审',
+    category: '研发',
+    desc: '用于架构风险识别、技术方案比较和实现建议。',
+  },
+  {
+    title: '研究整合',
+    category: '知识',
+    desc: '用于整理资料、提炼结论和输出结构化洞察。',
+  },
+  {
+    title: '客户声音',
+    category: '增长',
+    desc: '用于分析反馈、总结趋势和生成优化方向。',
+  },
+];
+
+const plugins = [
+  {
+    name: '代码解释器',
+    desc: '执行计算、处理数据集，并检查结构化输出结果。',
+    status: '已连接',
+  },
+  {
+    name: '图像生成',
+    desc: '根据结构化提示生成高质量视觉内容和概念画板。',
+    status: '可接入',
+  },
+  {
+    name: '知识库',
+    desc: '同步工作空间文档、追踪器和研究笔记。',
+    status: '可接入',
+  },
+  {
+    name: '科学计算',
+    desc: '访问可验证的计算推理与科学查询能力。',
+    status: '可接入',
+  },
+  {
+    name: '团队通知',
+    desc: '将摘要发送到协作频道，并生成后续沟通草稿。',
+    status: '可接入',
+  },
+];
+
+const defaultSystemPrompt = '你是一个专业、可靠、简洁的中文 AI 助手。';
+
+const getBlockText = (block: ChatContentBlock) => {
+  if (typeof block.text === 'string' && block.text.trim()) {
+    return block.text.trim();
   }
-  if (value.length <= 18) {
+  if (typeof block.thinking === 'string' && block.thinking.trim()) {
+    return block.thinking.trim();
+  }
+  if (typeof block.content === 'string' && block.content.trim()) {
+    return block.content.trim();
+  }
+  return '';
+};
+
+const getMessageText = (message: ChatMessage) => {
+  return message.content
+    .map((block) => getBlockText(block))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+};
+
+const getMessagePreview = (message: ChatMessage) => {
+  const text = getMessageText(message);
+  if (!text) {
+    return message.role === 'assistant' ? '助手回复' : '新对话';
+  }
+  return text.slice(0, 24);
+};
+
+const formatToolInput = (input: unknown) => {
+  if (!input) {
+    return '';
+  }
+  try {
+    return JSON.stringify(input, null, 2);
+  } catch (error) {
+    return String(error);
+  }
+};
+
+const createConversationID = () => `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const createRequestID = () => `stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const createConversationTitle = (messages: ChatMessage[]) => {
+  const userMessage = messages.find((item) => item.role === 'user');
+  if (!userMessage) {
+    return '新对话';
+  }
+
+  const base = getMessageText(userMessage)
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[，。！？；：、“”‘’【】（）()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!base) {
+    return '新对话';
+  }
+  return base.slice(0, 18);
+};
+
+const createEmptyConversation = (): ChatConversation => {
+  const now = new Date().toISOString();
+  return {
+    id: createConversationID(),
+    title: '新对话',
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+  };
+};
+
+const buildConversationPatch = (conversation: ChatConversation, messages: ChatMessage[], title?: string): ChatConversation => ({
+  ...conversation,
+  messages,
+  title: title ?? createConversationTitle(messages),
+  updatedAt: new Date().toISOString(),
+});
+
+const upsertConversation = (conversations: ChatConversation[], nextConversation: ChatConversation) => {
+  const index = conversations.findIndex((item) => item.id === nextConversation.id);
+  if (index === -1) {
+    return [nextConversation, ...conversations].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+  const next = [...conversations];
+  next[index] = nextConversation;
+  return next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+};
+
+const formatDateTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return `${value.slice(0, 8)}...${value.slice(-6)}`;
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 };
 
-const formatExpiry = (seconds?: number) => {
-  if (!seconds || seconds <= 0) {
-    return '未返回';
+const escapeMarkdownHTML = (value: string) =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+const renderMarkdownHTML = (value: string) => {
+  const html = marked.parse(escapeMarkdownHTML(value), {
+    async: false,
+    breaks: true,
+    gfm: true,
+  });
+  return typeof html === 'string' ? sanitizeMarkdownHTML(html) : '';
+};
+
+const sanitizeMarkdownHTML = (html: string) => {
+  if (typeof document === 'undefined') {
+    return html;
   }
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return `${minutes} 分 ${rest} 秒`;
+
+  const template = document.createElement('template');
+  template.innerHTML = html;
+
+  template.content.querySelectorAll('*').forEach((node) => {
+    Array.from(node.attributes).forEach((attribute) => {
+      if (attribute.name.startsWith('on')) {
+        node.removeAttribute(attribute.name);
+      }
+    });
+  });
+
+  template.content.querySelectorAll('a').forEach((link) => {
+    const href = link.getAttribute('href') || '';
+    const isSafeLink = href.startsWith('http://') || href.startsWith('https://') || href.startsWith('mailto:') || href.startsWith('#');
+    if (!isSafeLink) {
+      link.removeAttribute('href');
+      return;
+    }
+    link.setAttribute('target', '_blank');
+    link.setAttribute('rel', 'noreferrer');
+  });
+
+  template.content.querySelectorAll('img').forEach((image) => {
+    image.remove();
+  });
+
+  return template.innerHTML;
 };
 
-const isEmail = (value: string) => /\S+@\S+\.\S+/.test(value);
+const createAnimatedTextKey = (conversationID: string, messageIndex: number, blockIndex: number) =>
+  `${conversationID}:${messageIndex}:${blockIndex}`;
 
 export default function App() {
-  const [authView, setAuthView] = useState<AuthView>('password');
-  const [homeView, setHomeView] = useState<HomeView>('overview');
+  const [loginMode, setLoginMode] = useState<LoginMode>('password');
+  const [page, setPage] = useState<WorkspacePage>('chat');
+  const [message, setMessage] = useState('正在校验登录状态...');
   const [submitState, setSubmitState] = useState<SubmitState>('idle');
-  const [message, setMessage] = useState('请输入信息。');
-  const [booting, setBooting] = useState(true);
   const [remember, setRemember] = useState(true);
-  const [clientId, setClientId] = useState('ops_console_web');
+  const [booting, setBooting] = useState(true);
   const [loginResponse, setLoginResponse] = useState<LoginResponse | null>(null);
-  const [registerResponse, setRegisterResponse] = useState<RegisterResponse | null>(null);
-  const [validationErrors, setValidationErrors] = useState<ValidationErrors>({});
-  const [loginCodeCountdown, setLoginCodeCountdown] = useState(0);
-  const [registerCodeCountdown, setRegisterCodeCountdown] = useState(0);
+  const [form, setForm] = useState({ account: '', password: '' });
+  const [otpForm, setOtpForm] = useState({ email: '', code: '' });
+  const [otpCountdown, setOtpCountdown] = useState(0);
+  const [errors, setErrors] = useState<{ account?: string; password?: string }>({});
+  const [otpErrors, setOtpErrors] = useState<{ email?: string; code?: string }>({});
+  const [showPassword, setShowPassword] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [logoutAnimating, setLogoutAnimating] = useState(false);
-
+  const [composer, setComposer] = useState('');
+  const [conversations, setConversations] = useState<ChatConversation[]>([]);
+  const [activeConversationID, setActiveConversationID] = useState('');
+  const [isChatting, setIsChatting] = useState(false);
+  const [llmModel, setLLMModel] = useState('MiniMax-M2.7');
+  const [editingConversationID, setEditingConversationID] = useState('');
+  const [editingTitle, setEditingTitle] = useState('');
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [animatedMarkdownByKey, setAnimatedMarkdownByKey] = useState<Record<string, string>>({});
   const refreshTimerRef = useRef<number | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const streamRequestIDRef = useRef('');
+  const streamingConversationIDRef = useRef('');
+  const animatedMarkdownTargetsRef = useRef<Record<string, string>>({});
+  const animatedMarkdownTimersRef = useRef<Record<string, number>>({});
 
-  const [loginForm, setLoginForm] = useState({ account: '', password: '' });
-  const [emailLoginForm, setEmailLoginForm] = useState({ email: '', code: '' });
-  const [registerForm, setRegisterForm] = useState({
-    account: '',
-    password: '',
-    displayName: '',
-    email: '',
-    mobile: '',
-  });
-  const [emailRegisterForm, setEmailRegisterForm] = useState({
-    email: '',
-    code: '',
-    displayName: '',
-    password: '',
-  });
+  const scheduleMarkdownAnimation = (key: string) => {
+    if (animatedMarkdownTimersRef.current[key]) {
+      return;
+    }
+
+    const tick = () => {
+      let shouldContinue = false;
+      setAnimatedMarkdownByKey((current) => {
+        const target = animatedMarkdownTargetsRef.current[key] || '';
+        const previous = current[key] || '';
+        if (previous === target) {
+          return current;
+        }
+
+        const gap = target.length - previous.length;
+        const step = Math.min(Math.max(Math.ceil(Math.abs(gap) / 12), 1), 8);
+        const nextValue = target.startsWith(previous)
+          ? target.slice(0, previous.length + step)
+          : target;
+
+        shouldContinue = nextValue !== target;
+        return {
+          ...current,
+          [key]: nextValue,
+        };
+      });
+
+      if (shouldContinue) {
+        animatedMarkdownTimersRef.current[key] = window.setTimeout(tick, 18);
+        return;
+      }
+      delete animatedMarkdownTimersRef.current[key];
+    };
+
+    animatedMarkdownTimersRef.current[key] = window.setTimeout(tick, 18);
+  };
+
+  const redirectToLoginForExpiredSession = (tip?: string) => {
+    setLoginResponse(null);
+    setSubmitState('error');
+    setMessage(tip || '登录已过期，请重新登录');
+    setComposer('');
+    setPage('chat');
+    setUserMenuOpen(false);
+  };
+
+  const persistConversations = async (nextConversations: ChatConversation[]) => {
+    setConversations(nextConversations);
+    try {
+      await runtimeApp().SaveChatConversations(nextConversations);
+    } catch (error) {
+      setSubmitState('error');
+      setMessage(error instanceof Error ? error.message : '保存对话失败');
+    }
+  };
 
   useEffect(() => {
     let active = true;
 
     const bootstrap = async () => {
       try {
-        const app = runtimeApp();
-        const defaultRuntimeClientID = await app.GetDefaultClientID();
-        if (active && defaultRuntimeClientID) {
-          setClientId(defaultRuntimeClientID);
-        }
-
-        const response = await app.RestoreSession();
-        if (!active || !response?.data?.user) {
+        const [model, storedConversations] = await Promise.all([
+          runtimeApp().GetDefaultLLMModel(),
+          runtimeApp().LoadChatConversations(),
+        ]);
+        if (!active) {
           return;
         }
-        setLoginResponse(response);
-        setSubmitState('success');
-        setMessage('已恢复并校验本机登录状态。');
+        setLLMModel(model || 'MiniMax-M2.7');
+        setConversations(storedConversations || []);
+        if (storedConversations?.length) {
+          setActiveConversationID(storedConversations[0].id);
+        }
       } catch (error) {
         if (!active) {
           return;
         }
         setSubmitState('error');
         setMessage(error instanceof Error ? error.message : '初始化失败');
+      }
+
+      try {
+        const response = await runtimeApp().RestoreSession();
+        if (!active) {
+          return;
+        }
+        if (!response?.data?.user) {
+          return;
+        }
+        setLoginResponse(response);
+        setSubmitState('success');
+        setMessage('工作区已恢复。');
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+        redirectToLoginForExpiredSession();
       } finally {
         if (active) {
           setBooting(false);
@@ -164,27 +425,164 @@ export default function App() {
       }
     };
 
-    bootstrap();
+    void bootstrap();
     return () => {
       active = false;
     };
   }, []);
 
-  useEffect(() => {
-    if (loginCodeCountdown <= 0) {
-      return;
-    }
-    const timer = window.setTimeout(() => setLoginCodeCountdown((value) => value - 1), 1000);
-    return () => window.clearTimeout(timer);
-  }, [loginCodeCountdown]);
+  useEffect(() => () => {
+    Object.values(animatedMarkdownTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+    animatedMarkdownTimersRef.current = {};
+  }, []);
 
   useEffect(() => {
-    if (registerCodeCountdown <= 0) {
+    const offChunk = EventsOn('chat_stream_chunk', (...args: unknown[]) => {
+      const payload = args[0] as ChatStreamChunkPayload | undefined;
+      if (!payload || payload.requestId !== streamRequestIDRef.current) {
+        return;
+      }
+
+      setConversations((current) => {
+        const conversationID = streamingConversationIDRef.current;
+        const conversation = current.find((item) => item.id === conversationID);
+        if (!conversation) {
+          return current;
+        }
+
+        const messages = [...conversation.messages];
+        const lastMessage = messages[messages.length - 1];
+        if (!lastMessage || lastMessage.role !== 'assistant') {
+          messages.push({ role: 'assistant', content: [] });
+        }
+
+        const assistantMessage = messages[messages.length - 1];
+        const content = [...assistantMessage.content];
+        while (content.length <= payload.index) {
+          content.push({ type: '' });
+        }
+        content[payload.index] = payload.block;
+        messages[messages.length - 1] = {
+          ...assistantMessage,
+          content,
+        };
+
+        return upsertConversation(current, buildConversationPatch(conversation, messages, conversation.title));
+      });
+    });
+
+    const offComplete = EventsOn('chat_stream_complete', (...args: unknown[]) => {
+      const payload = args[0] as ChatStreamCompletePayload | undefined;
+      if (!payload || payload.requestId !== streamRequestIDRef.current) {
+        return;
+      }
+
+      streamRequestIDRef.current = '';
+      setIsChatting(false);
+      setConversations((current) => {
+        const conversationID = streamingConversationIDRef.current;
+        const conversation = current.find((item) => item.id === conversationID);
+        if (!conversation) {
+          return current;
+        }
+
+        const messages = [...conversation.messages];
+        const assistantMessage: ChatMessage = {
+          role: 'assistant',
+          content: Array.isArray(payload.response.content) ? payload.response.content : [],
+        };
+
+        if (messages.length > 0 && messages[messages.length - 1]?.role === 'assistant') {
+          messages[messages.length - 1] = assistantMessage;
+        } else {
+          messages.push(assistantMessage);
+        }
+
+        const autoTitle = conversation.title === '新对话' ? undefined : conversation.title;
+        const nextConversation = buildConversationPatch(conversation, messages, autoTitle);
+        const nextConversations = upsertConversation(current, nextConversation);
+        void runtimeApp().SaveChatConversations(nextConversations);
+        return nextConversations;
+      });
+
+      setSubmitState('success');
+      setMessage('对话已更新。');
+    });
+
+    return () => {
+      offChunk();
+      offComplete();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isChatting) {
+      Object.values(animatedMarkdownTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+      animatedMarkdownTimersRef.current = {};
+      animatedMarkdownTargetsRef.current = {};
+      setAnimatedMarkdownByKey({});
       return;
     }
-    const timer = window.setTimeout(() => setRegisterCodeCountdown((value) => value - 1), 1000);
+
+    const conversationID = streamingConversationIDRef.current || activeConversationID;
+    const conversation = conversations.find((item) => item.id === conversationID);
+    if (!conversation) {
+      return;
+    }
+
+    const messageIndex = conversation.messages.length - 1;
+    const assistantMessage = conversation.messages[messageIndex];
+    if (!assistantMessage || assistantMessage.role !== 'assistant') {
+      return;
+    }
+
+    const activeKeys = new Set<string>();
+    const nextTargets: Record<string, string> = {};
+    assistantMessage.content.forEach((block, blockIndex) => {
+      if (block.type !== 'text') {
+        return;
+      }
+      const key = createAnimatedTextKey(conversation.id, messageIndex, blockIndex);
+      activeKeys.add(key);
+      nextTargets[key] = getBlockText(block);
+      animatedMarkdownTargetsRef.current[key] = nextTargets[key];
+    });
+
+    setAnimatedMarkdownByKey((current) => {
+      let changed = false;
+      const next = { ...current };
+      Object.keys(next).forEach((key) => {
+        if (!activeKeys.has(key)) {
+          delete next[key];
+          changed = true;
+        }
+      });
+      activeKeys.forEach((key) => {
+        if (next[key] === undefined) {
+          next[key] = '';
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+
+    activeKeys.forEach((key) => scheduleMarkdownAnimation(key));
+  }, [activeConversationID, conversations, isChatting]);
+
+  useEffect(() => {
+    if (!chatScrollRef.current) {
+      return;
+    }
+    chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+  }, [conversations, activeConversationID, isChatting]);
+
+  useEffect(() => {
+    if (otpCountdown <= 0) {
+      return;
+    }
+    const timer = window.setTimeout(() => setOtpCountdown((value) => value - 1), 1000);
     return () => window.clearTimeout(timer);
-  }, [registerCodeCountdown]);
+  }, [otpCountdown]);
 
   useEffect(() => {
     if (refreshTimerRef.current) {
@@ -194,25 +592,24 @@ export default function App() {
 
     const expiresIn = loginResponse?.data?.expiresIn;
     const refreshToken = loginResponse?.data?.refreshToken;
-    if (!loginResponse?.data?.accessToken || !refreshToken || !expiresIn || expiresIn <= 90) {
+    if (!loginResponse?.data?.accessToken || !refreshToken) {
       return;
     }
 
-    const delayMs = Math.max((expiresIn - 60) * 1000, 15000);
     refreshTimerRef.current = window.setTimeout(async () => {
       try {
         setIsRefreshing(true);
-        const response = await runtimeApp().RefreshSession(clientId.trim());
+        const response = await runtimeApp().RefreshSession('ops_console_web');
         setLoginResponse(response);
         setSubmitState('success');
-        setMessage('检测到会话即将过期，已自动刷新 Token。');
+        setMessage('会话已刷新。');
       } catch (error) {
-        setSubmitState('error');
-        setMessage(error instanceof Error ? error.message : '自动刷新 Token 失败');
+        void error;
+        redirectToLoginForExpiredSession();
       } finally {
         setIsRefreshing(false);
       }
-    }, delayMs);
+    }, expiresIn ? Math.max((expiresIn - 60) * 1000, 15000) : 5 * 60 * 1000);
 
     return () => {
       if (refreshTimerRef.current) {
@@ -220,761 +617,858 @@ export default function App() {
         refreshTimerRef.current = null;
       }
     };
-  }, [clientId, loginResponse]);
+  }, [loginResponse]);
 
   const currentUser = loginResponse?.data?.user;
   const isLoggedIn = Boolean(currentUser);
-
-  const canPasswordLogin = useMemo(() => {
-    return loginForm.account.trim() !== '' && loginForm.password.trim() !== '';
-  }, [loginForm]);
-
-  const canEmailLogin = useMemo(() => {
-    return emailLoginForm.email.trim() !== '' && emailLoginForm.code.trim() !== '';
-  }, [emailLoginForm]);
-
-  const canRegister = useMemo(() => {
-    return registerForm.account.trim() !== '' && registerForm.password.trim() !== '' && registerForm.displayName.trim() !== '';
-  }, [registerForm]);
-
-  const canEmailRegister = useMemo(() => {
-    return (
-      emailRegisterForm.email.trim() !== '' &&
-      emailRegisterForm.code.trim() !== '' &&
-      emailRegisterForm.displayName.trim() !== '' &&
-      emailRegisterForm.password.trim() !== ''
-    );
-  }, [emailRegisterForm]);
-
-  const workspaceItems = useMemo(
-    () => [
-      {
-        title: 'Agent Studio',
-        status: 'Ready',
-        desc: '用于承接智能体编排、任务流和执行日志。',
-      },
-      {
-        title: 'Prompt Library',
-        status: 'Draft',
-        desc: '用于管理提示词模板、变量片段和版本对比。',
-      },
-      {
-        title: 'Knowledge Dock',
-        status: 'Queued',
-        desc: '用于接入文档导入、检索、知识分片和向量索引。',
-      },
-    ],
-    [],
+  const activeConversation = useMemo(
+    () => conversations.find((item) => item.id === activeConversationID) || null,
+    [conversations, activeConversationID],
   );
-
-  const updateMessage = (next: string, state: SubmitState) => {
-    setSubmitState(state);
-    setMessage(next);
-  };
-
-  const clearValidation = () => setValidationErrors({});
-
-  const validatePasswordLogin = () => {
-    const next: ValidationErrors = {};
-    if (!loginForm.account.trim()) {
-      next.loginAccount = '请输入账号';
-    }
-    if (!loginForm.password.trim()) {
-      next.loginPassword = '请输入密码';
-    }
-    setValidationErrors(next);
-    return Object.keys(next).length === 0;
-  };
-
-  const validateEmailLogin = () => {
-    const next: ValidationErrors = {};
-    if (!emailLoginForm.email.trim()) {
-      next.emailLoginEmail = '请输入邮箱';
-    } else if (!isEmail(emailLoginForm.email.trim())) {
-      next.emailLoginEmail = '请输入有效邮箱地址';
-    }
-    if (!emailLoginForm.code.trim()) {
-      next.emailLoginCode = '请输入验证码';
-    }
-    setValidationErrors(next);
-    return Object.keys(next).length === 0;
-  };
-
-  const validateRegister = () => {
-    const next: ValidationErrors = {};
-    if (!registerForm.account.trim()) {
-      next.registerAccount = '请输入注册账号';
-    }
-    if (!registerForm.displayName.trim()) {
-      next.registerDisplayName = '请输入显示名';
-    }
-    if (!registerForm.password.trim()) {
-      next.registerPassword = '请输入密码';
-    } else if (registerForm.password.trim().length < 8) {
-      next.registerPassword = '密码至少需要 8 位';
-    }
-    if (registerForm.email.trim() && !isEmail(registerForm.email.trim())) {
-      next.registerEmail = '邮箱格式不正确';
-    }
-    setValidationErrors(next);
-    return Object.keys(next).length === 0;
-  };
-
-  const validateEmailRegister = () => {
-    const next: ValidationErrors = {};
-    if (!emailRegisterForm.email.trim()) {
-      next.emailRegisterEmail = '请输入邮箱';
-    } else if (!isEmail(emailRegisterForm.email.trim())) {
-      next.emailRegisterEmail = '邮箱格式不正确';
-    }
-    if (!emailRegisterForm.code.trim()) {
-      next.emailRegisterCode = '请输入验证码';
-    }
-    if (!emailRegisterForm.displayName.trim()) {
-      next.emailRegisterDisplayName = '请输入显示名';
-    }
-    if (!emailRegisterForm.password.trim()) {
-      next.emailRegisterPassword = '请输入密码';
-    } else if (emailRegisterForm.password.trim().length < 8) {
-      next.emailRegisterPassword = '密码至少需要 8 位';
-    }
-    setValidationErrors(next);
-    return Object.keys(next).length === 0;
-  };
-
-  const handlePasswordLogin = async (event: Event) => {
-    event.preventDefault();
-    clearValidation();
-    if (!validatePasswordLogin()) {
-      updateMessage('请先补全账号密码信息。', 'error');
-      return;
-    }
-
-    updateMessage('正在通过账号密码登录...', 'submitting');
-    try {
-      const response = await runtimeApp().Login(loginForm.account.trim(), loginForm.password.trim(), remember);
-      setLoginResponse(response);
-      setRegisterResponse(null);
-      setLoginForm((prev) => ({ ...prev, password: '' }));
-      updateMessage(response.msg || '登录成功，正在进入桌面工作台。', 'success');
-    } catch (error) {
-      updateMessage(error instanceof Error ? error.message : '登录失败，请稍后重试', 'error');
-    }
-  };
-
-  const handleEmailCodeLogin = async (event: Event) => {
-    event.preventDefault();
-    clearValidation();
-    if (!validateEmailLogin()) {
-      updateMessage('请先补全邮箱验证码登录信息。', 'error');
-      return;
-    }
-
-    updateMessage('正在通过邮箱验证码换取 Token...', 'submitting');
-    try {
-      const response = await runtimeApp().LoginByEmailCode(
-        emailLoginForm.email.trim(),
-        emailLoginForm.code.trim(),
-        clientId.trim(),
-        remember,
-      );
-      setLoginResponse(response);
-      setRegisterResponse(null);
-      setEmailLoginForm((prev) => ({ ...prev, code: '' }));
-      updateMessage(response.msg || '验证码登录成功。', 'success');
-    } catch (error) {
-      updateMessage(error instanceof Error ? error.message : '邮箱验证码登录失败', 'error');
-    }
-  };
-
-  const handleRegister = async (event: Event) => {
-    event.preventDefault();
-    clearValidation();
-    if (!validateRegister()) {
-      updateMessage('请检查注册信息是否完整。', 'error');
-      return;
-    }
-
-    updateMessage('正在提交账号注册...', 'submitting');
-    try {
-      const response = await runtimeApp().Register(
-        registerForm.account.trim(),
-        registerForm.password.trim(),
-        registerForm.displayName.trim(),
-        registerForm.email.trim(),
-        registerForm.mobile.trim(),
-      );
-      setRegisterResponse(response);
-      updateMessage(response.msg || '账号注册成功，可以切换到登录继续。', 'success');
-      setAuthView('password');
-      setLoginForm((prev) => ({ ...prev, account: registerForm.account.trim() }));
-    } catch (error) {
-      updateMessage(error instanceof Error ? error.message : '账号注册失败', 'error');
-    }
-  };
-
-  const handleEmailRegister = async (event: Event) => {
-    event.preventDefault();
-    clearValidation();
-    if (!validateEmailRegister()) {
-      updateMessage('请检查邮箱验证码注册信息。', 'error');
-      return;
-    }
-
-    updateMessage('正在提交邮箱验证码注册...', 'submitting');
-    try {
-      const response = await runtimeApp().RegisterByEmail(
-        emailRegisterForm.email.trim(),
-        emailRegisterForm.code.trim(),
-        emailRegisterForm.displayName.trim(),
-        emailRegisterForm.password.trim(),
-      );
-      setRegisterResponse({
-        code: response.code,
-        msg: response.msg,
-        uuid: response.uuid,
-        data: {
-          displayName: emailRegisterForm.displayName.trim(),
-        },
-      });
-      updateMessage(response.msg || '邮箱验证码注册成功，请返回登录。', 'success');
-      setAuthView('emailCode');
-      setEmailLoginForm((prev) => ({ ...prev, email: emailRegisterForm.email.trim() }));
-    } catch (error) {
-      updateMessage(error instanceof Error ? error.message : '邮箱验证码注册失败', 'error');
-    }
-  };
-
-  const handleSendEmailCode = async (scene: CodeScene) => {
-    clearValidation();
-    const email = scene === 'login' ? emailLoginForm.email.trim() : emailRegisterForm.email.trim();
-    if (!email) {
-      updateMessage('请先输入邮箱，再发送验证码。', 'error');
-      setValidationErrors((prev) => ({
-        ...prev,
-        [scene === 'login' ? 'emailLoginEmail' : 'emailRegisterEmail']: '请先填写邮箱',
-      }));
-      return;
-    }
-    if (!isEmail(email)) {
-      updateMessage('邮箱格式不正确。', 'error');
-      setValidationErrors((prev) => ({
-        ...prev,
-        [scene === 'login' ? 'emailLoginEmail' : 'emailRegisterEmail']: '请输入有效邮箱地址',
-      }));
-      return;
-    }
-
-    updateMessage(`正在发送${scene === 'login' ? '登录' : '注册'}验证码...`, 'submitting');
-    try {
-      const response = await runtimeApp().SendEmailCode(email, scene);
-      if (scene === 'login') {
-        setLoginCodeCountdown(60);
-      } else {
-        setRegisterCodeCountdown(60);
+  const chatMessages = activeConversation?.messages ?? [];
+  const recentChats = useMemo(() => conversations.slice(0, 6), [conversations]);
+  const canLogin = useMemo(() => form.account.trim() !== '' && form.password.trim() !== '', [form]);
+  const isSessionChecking = booting && !isLoggedIn;
+  const canSendMessage = composer.trim() !== '' && !isChatting && !isSessionChecking;
+  const latestUserMessage = useMemo(() => {
+    for (let index = chatMessages.length - 1; index >= 0; index -= 1) {
+      if (chatMessages[index]?.role === 'user') {
+        return chatMessages[index];
       }
-      updateMessage(response.msg || '验证码已发送，请查收邮箱。', 'success');
+    }
+    return null;
+  }, [chatMessages]);
+
+  const ensureConversation = async () => {
+    if (activeConversation) {
+      return activeConversation;
+    }
+    const conversation = createEmptyConversation();
+    const nextConversations = upsertConversation(conversations, conversation);
+    setActiveConversationID(conversation.id);
+    await persistConversations(nextConversations);
+    return conversation;
+  };
+
+  const copyText = async (text: string) => {
+    if (!text.trim()) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setSubmitState('success');
+      setMessage('内容已复制。');
     } catch (error) {
-      updateMessage(error instanceof Error ? error.message : '验证码发送失败', 'error');
+      setSubmitState('error');
+      setMessage(error instanceof Error ? error.message : '复制失败');
     }
   };
 
-  const handleRefreshSession = async (source: 'manual' | 'auto' = 'manual') => {
-    if (source === 'manual') {
-      updateMessage('正在刷新当前会话 Token...', 'submitting');
+  const validate = () => {
+    const next: { account?: string; password?: string } = {};
+    if (!form.account.trim()) {
+      next.account = '请输入账号';
     }
+    if (!form.password.trim()) {
+      next.password = '请输入密码';
+    }
+    setErrors(next);
+    return Object.keys(next).length === 0;
+  };
+
+  const handleLogin = async (event: Event) => {
+    event.preventDefault();
+    if (!validate()) {
+      setSubmitState('error');
+      setMessage('请检查必填项。');
+      return;
+    }
+
+    setSubmitState('submitting');
+    setMessage('正在登录...');
     try {
-      setIsRefreshing(true);
-      const response = await runtimeApp().RefreshSession(clientId.trim());
+      const response = await runtimeApp().Login(form.account.trim(), form.password.trim(), remember);
       setLoginResponse(response);
-      updateMessage(source === 'auto' ? '会话临近过期，已自动刷新 Token。' : response.msg || 'Token 刷新成功。', 'success');
+      setForm((prev) => ({ ...prev, password: '' }));
+      setSubmitState('success');
+      setMessage(response.msg || '欢迎回来。');
     } catch (error) {
-      updateMessage(error instanceof Error ? error.message : '刷新 Token 失败', 'error');
+      setSubmitState('error');
+      setMessage(error instanceof Error ? error.message : '登录失败');
+    }
+  };
+
+  const validateOTP = () => {
+    const next: { email?: string; code?: string } = {};
+    if (!otpForm.email.trim()) {
+      next.email = '请输入邮箱';
+    }
+    if (!otpForm.code.trim()) {
+      next.code = '请输入验证码';
+    }
+    setOtpErrors(next);
+    return Object.keys(next).length === 0;
+  };
+
+  const handleOTPLogin = async (event: Event) => {
+    event.preventDefault();
+    if (!validateOTP()) {
+      setSubmitState('error');
+      setMessage('请检查必填项。');
+      return;
+    }
+
+    setSubmitState('submitting');
+    setMessage('正在登录...');
+    try {
+      const response = await runtimeApp().LoginByEmailCode(otpForm.email.trim(), otpForm.code.trim(), 'ops_console_web', remember);
+      setLoginResponse(response);
+      setOtpForm((prev) => ({ ...prev, code: '' }));
+      setSubmitState('success');
+      setMessage(response.msg || '欢迎回来。');
+    } catch (error) {
+      setSubmitState('error');
+      setMessage(error instanceof Error ? error.message : '登录失败');
+    }
+  };
+
+  const handleSendOTPCode = async () => {
+    const email = otpForm.email.trim();
+    if (!email) {
+      setOtpErrors({ email: '请输入邮箱' });
+      setSubmitState('error');
+      setMessage('请检查必填项。');
+      return;
+    }
+
+    setSubmitState('submitting');
+    setMessage('正在发送验证码...');
+    try {
+      await runtimeApp().SendEmailCode(email, 'login');
+      setOtpCountdown(60);
+      setSubmitState('success');
+      setMessage('验证码已发送。');
+    } catch (error) {
+      setSubmitState('error');
+      setMessage(error instanceof Error ? error.message : '验证码发送失败');
+    }
+  };
+
+  const handleLogout = async () => {
+    setSubmitState('submitting');
+    setMessage('正在退出登录...');
+    try {
+      await runtimeApp().Logout();
+      setLoginResponse(null);
+      setComposer('');
+      setPage('chat');
+      setUserMenuOpen(false);
+      setSubmitState('success');
+      setMessage('已退出登录。');
+    } catch (error) {
+      setSubmitState('error');
+      setMessage(error instanceof Error ? error.message : '退出登录失败');
+    }
+  };
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    setSubmitState('submitting');
+    setMessage('正在刷新会话...');
+    try {
+      const response = await runtimeApp().RefreshSession('ops_console_web');
+      setLoginResponse(response);
+      setSubmitState('success');
+      setMessage(response.msg || '会话已刷新。');
+    } catch (error) {
+      void error;
+      redirectToLoginForExpiredSession();
     } finally {
       setIsRefreshing(false);
     }
   };
 
-  const handleLogout = async () => {
-    updateMessage('正在退出登录...', 'submitting');
+  const openConversation = (conversationID: string) => {
+    setActiveConversationID(conversationID);
+    setPage('chat');
+    setUserMenuOpen(false);
+  };
+
+  const createNewConversation = async () => {
+    const conversation = createEmptyConversation();
+    const nextConversations = upsertConversation(conversations, conversation);
+    setActiveConversationID(conversation.id);
+    setPage('chat');
+    setComposer('');
+    setEditingConversationID('');
+    setUserMenuOpen(false);
+    await persistConversations(nextConversations);
+  };
+
+  const renameConversation = async (conversationID: string, title: string) => {
+    const trimmedTitle = title.trim();
+    if (!trimmedTitle) {
+      setEditingConversationID('');
+      setEditingTitle('');
+      return;
+    }
+    const conversation = conversations.find((item) => item.id === conversationID);
+    if (!conversation) {
+      return;
+    }
+    const nextConversation = {
+      ...conversation,
+      title: trimmedTitle,
+      updatedAt: new Date().toISOString(),
+    };
+    setEditingConversationID('');
+    setEditingTitle('');
+    await persistConversations(upsertConversation(conversations, nextConversation));
+  };
+
+  const deleteConversation = async (conversationID: string) => {
+    const target = conversations.find((item) => item.id === conversationID);
+    if (!target) {
+      return;
+    }
+
+    if (streamingConversationIDRef.current === conversationID && streamRequestIDRef.current) {
+      try {
+        await runtimeApp().StopChatStream(streamRequestIDRef.current);
+      } catch {
+        // ignore stop error before deletion
+      }
+      streamRequestIDRef.current = '';
+      setIsChatting(false);
+    }
+
+    const nextConversations = conversations.filter((item) => item.id !== conversationID);
+    if (activeConversationID === conversationID) {
+      setActiveConversationID(nextConversations[0]?.id || '');
+      setPage(nextConversations.length > 0 ? 'chat' : 'library');
+    }
+    await persistConversations(nextConversations);
+    setSubmitState('success');
+    setMessage('对话已删除。');
+  };
+
+  const stopCurrentStream = async () => {
+    if (!streamRequestIDRef.current) {
+      return;
+    }
     try {
-      setLogoutAnimating(true);
-      const response = await runtimeApp().Logout();
-      await new Promise((resolve) => window.setTimeout(resolve, 320));
-      setLoginResponse(null);
-      setRegisterResponse(null);
-      setHomeView('overview');
-      setPasswordSafe();
-      setLogoutAnimating(false);
-      updateMessage(response.msg || response.data?.message || '已退出登录。', 'success');
+      await runtimeApp().StopChatStream(streamRequestIDRef.current);
+      streamRequestIDRef.current = '';
+      setIsChatting(false);
+      setSubmitState('success');
+      setMessage('已停止生成。');
     } catch (error) {
-      setLogoutAnimating(false);
-      updateMessage(error instanceof Error ? error.message : '退出登录失败', 'error');
+      setSubmitState('error');
+      setMessage(error instanceof Error ? error.message : '停止生成失败');
     }
   };
 
-  const setPasswordSafe = () => {
-    setLoginForm((prev) => ({ ...prev, password: '' }));
-    setEmailLoginForm((prev) => ({ ...prev, code: '' }));
+  const sendChatMessage = async (rawText?: string, baseConversation?: ChatConversation) => {
+    const text = (rawText ?? composer).trim();
+    if (!text || isChatting) {
+      return;
+    }
+
+    const conversation = baseConversation ?? (await ensureConversation());
+    const userMessage: ChatMessage = {
+      role: 'user',
+      content: [{ type: 'text', text }],
+    };
+
+    const pendingAssistantMessage: ChatMessage = {
+      role: 'assistant',
+      content: [],
+    };
+
+    const requestID = createRequestID();
+    streamRequestIDRef.current = requestID;
+    streamingConversationIDRef.current = conversation.id;
+
+    const nextMessages = [...conversation.messages, userMessage, pendingAssistantMessage];
+    const nextConversation = buildConversationPatch(conversation, nextMessages, conversation.title === '新对话' ? undefined : conversation.title);
+    const nextConversations = upsertConversation(conversations, nextConversation);
+
+    setActiveConversationID(conversation.id);
+    setComposer('');
+    setPage('chat');
+    setIsChatting(true);
+    await persistConversations(nextConversations);
+
+    try {
+      await runtimeApp().StartChatStream(requestID, [...conversation.messages, userMessage], defaultSystemPrompt);
+    } catch (error) {
+      streamRequestIDRef.current = '';
+      setIsChatting(false);
+      const errorMessage = error instanceof Error ? error.message : '消息发送失败';
+      setSubmitState('error');
+      setMessage(errorMessage);
+
+      const rollbackConversation = buildConversationPatch(conversation, [...conversation.messages, userMessage], conversation.title);
+      await persistConversations(upsertConversation(nextConversations, rollbackConversation));
+    }
   };
 
-  const authFieldError = (key: string) => validationErrors[key];
-
-  const renderAuthForm = () => {
-    if (authView === 'password') {
-      return (
-        <form className="auth-form" onSubmit={handlePasswordLogin}>
-          <label className="field">
-            <span>账号</span>
-            <input
-              type="text"
-              placeholder="请输入账号"
-              value={loginForm.account}
-              onInput={(event) => setLoginForm((prev) => ({ ...prev, account: (event.target as HTMLInputElement).value }))}
-            />
-            {authFieldError('loginAccount') ? <em className="field-error">{authFieldError('loginAccount')}</em> : null}
-          </label>
-          <label className="field">
-            <span>密码</span>
-            <input
-              type="password"
-              placeholder="请输入密码"
-              value={loginForm.password}
-              onInput={(event) => setLoginForm((prev) => ({ ...prev, password: (event.target as HTMLInputElement).value }))}
-            />
-            {authFieldError('loginPassword') ? <em className="field-error">{authFieldError('loginPassword')}</em> : null}
-          </label>
-          <div className="inline-row">
-            <label className="remember-box">
-              <input type="checkbox" checked={remember} onChange={() => setRemember(!remember)} />
-              <span>记住本机登录状态</span>
-            </label>
-          </div>
-          <button className="submit-button" type="submit" disabled={!canPasswordLogin || submitState === 'submitting' || booting}>
-            {booting ? '初始化中...' : submitState === 'submitting' ? '正在登录...' : '进入工作台'}
-          </button>
-        </form>
-      );
+  const retryLastPrompt = async () => {
+    if (!activeConversation || isChatting) {
+      return;
     }
 
-    if (authView === 'emailCode') {
-      return (
-        <form className="auth-form" onSubmit={handleEmailCodeLogin}>
-          <label className="field">
-            <span>邮箱</span>
-            <input
-              type="email"
-              placeholder="请输入邮箱"
-              value={emailLoginForm.email}
-              onInput={(event) => setEmailLoginForm((prev) => ({ ...prev, email: (event.target as HTMLInputElement).value }))}
-            />
-            {authFieldError('emailLoginEmail') ? <em className="field-error">{authFieldError('emailLoginEmail')}</em> : null}
-          </label>
-          <div className="code-row">
-            <label className="field">
-              <span>验证码</span>
-              <input
-                type="text"
-                placeholder="6 位验证码"
-                value={emailLoginForm.code}
-                onInput={(event) => setEmailLoginForm((prev) => ({ ...prev, code: (event.target as HTMLInputElement).value }))}
-              />
-              {authFieldError('emailLoginCode') ? <em className="field-error">{authFieldError('emailLoginCode')}</em> : null}
-            </label>
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={loginCodeCountdown > 0 || submitState === 'submitting'}
-              onClick={() => handleSendEmailCode('login')}
-            >
-              {loginCodeCountdown > 0 ? `${loginCodeCountdown}s 后重发` : '发送验证码'}
-            </button>
-          </div>
-          <label className="field">
-            <span>Client ID</span>
-            <input
-              type="text"
-              placeholder="ops_console_web"
-              value={clientId}
-              onInput={(event) => setClientId((event.target as HTMLInputElement).value)}
-            />
-          </label>
-          <div className="inline-row">
-            <label className="remember-box">
-              <input type="checkbox" checked={remember} onChange={() => setRemember(!remember)} />
-              <span>记住本机登录状态</span>
-            </label>
-          </div>
-          <button className="submit-button" type="submit" disabled={!canEmailLogin || submitState === 'submitting' || booting}>
-            进入工作台
-          </button>
-        </form>
-      );
+    const messages = [...activeConversation.messages];
+    let lastUserIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]?.role === 'user') {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    if (lastUserIndex === -1) {
+      return;
     }
 
-    if (authView === 'register') {
-      return (
-        <form className="auth-form" onSubmit={handleRegister}>
-          <div className="dual-grid">
-            <label className="field">
-              <span>账号</span>
-              <input
-                type="text"
-                placeholder="自定义账号"
-                value={registerForm.account}
-                onInput={(event) => setRegisterForm((prev) => ({ ...prev, account: (event.target as HTMLInputElement).value }))}
-              />
-              {authFieldError('registerAccount') ? <em className="field-error">{authFieldError('registerAccount')}</em> : null}
-            </label>
-            <label className="field">
-              <span>显示名</span>
-              <input
-                type="text"
-                placeholder="展示给团队看的名字"
-                value={registerForm.displayName}
-                onInput={(event) => setRegisterForm((prev) => ({ ...prev, displayName: (event.target as HTMLInputElement).value }))}
-              />
-              {authFieldError('registerDisplayName') ? <em className="field-error">{authFieldError('registerDisplayName')}</em> : null}
-            </label>
-          </div>
-          <label className="field">
-            <span>密码</span>
-            <input
-              type="password"
-              placeholder="请输入密码"
-              value={registerForm.password}
-              onInput={(event) => setRegisterForm((prev) => ({ ...prev, password: (event.target as HTMLInputElement).value }))}
-            />
-            {authFieldError('registerPassword') ? <em className="field-error">{authFieldError('registerPassword')}</em> : null}
-          </label>
-          <div className="dual-grid">
-            <label className="field">
-              <span>邮箱</span>
-              <input
-                type="email"
-                placeholder="可选"
-                value={registerForm.email}
-                onInput={(event) => setRegisterForm((prev) => ({ ...prev, email: (event.target as HTMLInputElement).value }))}
-              />
-              {authFieldError('registerEmail') ? <em className="field-error">{authFieldError('registerEmail')}</em> : null}
-            </label>
-            <label className="field">
-              <span>手机号</span>
-              <input
-                type="text"
-                placeholder="可选"
-                value={registerForm.mobile}
-                onInput={(event) => setRegisterForm((prev) => ({ ...prev, mobile: (event.target as HTMLInputElement).value }))}
-              />
-            </label>
-          </div>
-          <button className="submit-button" type="submit" disabled={!canRegister || submitState === 'submitting'}>
-            提交注册
-          </button>
-        </form>
-      );
+    const prompt = getMessageText(messages[lastUserIndex]);
+    if (!prompt) {
+      return;
     }
 
-    return (
-      <form className="auth-form" onSubmit={handleEmailRegister}>
-        <label className="field">
-          <span>邮箱</span>
-          <input
-            type="email"
-            placeholder="请输入邮箱"
-            value={emailRegisterForm.email}
-            onInput={(event) => setEmailRegisterForm((prev) => ({ ...prev, email: (event.target as HTMLInputElement).value }))}
-          />
-          {authFieldError('emailRegisterEmail') ? <em className="field-error">{authFieldError('emailRegisterEmail')}</em> : null}
-        </label>
-        <div className="code-row">
-          <label className="field">
-            <span>验证码</span>
-            <input
-              type="text"
-              placeholder="6 位验证码"
-              value={emailRegisterForm.code}
-              onInput={(event) => setEmailRegisterForm((prev) => ({ ...prev, code: (event.target as HTMLInputElement).value }))}
-            />
-            {authFieldError('emailRegisterCode') ? <em className="field-error">{authFieldError('emailRegisterCode')}</em> : null}
-          </label>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={registerCodeCountdown > 0 || submitState === 'submitting'}
-            onClick={() => handleSendEmailCode('register')}
-          >
-            {registerCodeCountdown > 0 ? `${registerCodeCountdown}s 后重发` : '发送验证码'}
-          </button>
-        </div>
-        <div className="dual-grid">
-          <label className="field">
-            <span>显示名</span>
-            <input
-              type="text"
-              placeholder="请输入显示名"
-              value={emailRegisterForm.displayName}
-              onInput={(event) => setEmailRegisterForm((prev) => ({ ...prev, displayName: (event.target as HTMLInputElement).value }))}
-            />
-            {authFieldError('emailRegisterDisplayName') ? <em className="field-error">{authFieldError('emailRegisterDisplayName')}</em> : null}
-          </label>
-          <label className="field">
-            <span>密码</span>
-            <input
-              type="password"
-              placeholder="请输入密码"
-              value={emailRegisterForm.password}
-              onInput={(event) => setEmailRegisterForm((prev) => ({ ...prev, password: (event.target as HTMLInputElement).value }))}
-            />
-            {authFieldError('emailRegisterPassword') ? <em className="field-error">{authFieldError('emailRegisterPassword')}</em> : null}
-          </label>
-        </div>
-        <button className="submit-button" type="submit" disabled={!canEmailRegister || submitState === 'submitting'}>
-          完成注册
-        </button>
-      </form>
-    );
+    const trimmedConversation = buildConversationPatch(activeConversation, messages.slice(0, lastUserIndex), activeConversation.title);
+    await persistConversations(upsertConversation(conversations, trimmedConversation));
+    await sendChatMessage(prompt, trimmedConversation);
   };
 
-  const renderOverview = () => (
-    <section className="content-grid">
-      <article className="metric-card">
-        <span>当前用户</span>
-        <strong>{currentUser?.displayName || currentUser?.account || '未命名用户'}</strong>
-        <p>{currentUser?.email || currentUser?.mobile || '还没有绑定更多联系方式'}</p>
-      </article>
-      <article className="metric-card">
-        <span>会话状态</span>
-        <strong>{isRefreshing ? 'Refreshing' : 'Healthy'}</strong>
-        <p>{isRefreshing ? '正在后台刷新 Token，确保桌面工作区不断线。' : '当前会话已建立，可继续承接真实业务模块。'}</p>
-      </article>
-      <article className="metric-card wide">
-        <span>今日工作面板</span>
-        <strong>首页框架已具备可承载真实模块的布局</strong>
-        <p>左侧导航可继续映射到项目、Prompt、知识库、执行记录；顶部动作区已经预留刷新会话和退出入口。</p>
-      </article>
-    </section>
+  const handleComposerKeyDown = async (event: KeyboardEvent) => {
+    if (event.key !== 'Enter' || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    await sendChatMessage();
+  };
+
+  const renderLogin = () => (
+    <main className="login-page">
+      <section className="login-shell">
+        <section className="login-brand" style={{ backgroundImage: `url(${loginBackground})` }} aria-hidden="true" />
+
+        <section className="login-panel">
+          <div className="login-card">
+            <div className="login-heading">
+              <h2>欢迎回来</h2>
+            </div>
+
+            <div className="login-tabs">
+              <button
+                className={`login-tab ${loginMode === 'password' ? 'login-tab-active' : ''}`}
+                type="button"
+                onClick={() => setLoginMode('password')}
+              >
+                密码登录
+              </button>
+              <button
+                className={`login-tab ${loginMode === 'otp' ? 'login-tab-active' : ''}`}
+                type="button"
+                onClick={() => setLoginMode('otp')}
+              >
+                验证码登录
+              </button>
+            </div>
+
+            {loginMode === 'password' ? (
+              <form className="login-form" onSubmit={handleLogin}>
+                <label className="field">
+                  <span>邮箱地址</span>
+                  <div className="field-box">
+                    <i>✉</i>
+                    <input
+                      type="text"
+                      placeholder="name@company.com"
+                      value={form.account}
+                      onInput={(event) => {
+                        setErrors((prev) => ({ ...prev, account: undefined }));
+                        setForm((prev) => ({ ...prev, account: (event.target as HTMLInputElement).value }));
+                      }}
+                    />
+                  </div>
+                  {errors.account ? <em>{errors.account}</em> : null}
+                </label>
+
+                <label className="field">
+                  <div className="field-inline">
+                    <span>密码</span>
+                    <button className="text-link" type="button">
+                      忘记密码？
+                    </button>
+                  </div>
+                  <div className="field-box">
+                    <i>⌑</i>
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      placeholder="••••••••"
+                      value={form.password}
+                      onInput={(event) => {
+                        setErrors((prev) => ({ ...prev, password: undefined }));
+                        setForm((prev) => ({ ...prev, password: (event.target as HTMLInputElement).value }));
+                      }}
+                    />
+                    <button className="icon-button" type="button" onClick={() => setShowPassword(!showPassword)}>
+                      {showPassword ? '🙈' : '👁'}
+                    </button>
+                  </div>
+                  {errors.password ? <em>{errors.password}</em> : null}
+                </label>
+
+                <button className="primary-button" type="submit" disabled={!canLogin || booting || submitState === 'submitting'}>
+                  {booting ? '加载中...' : submitState === 'submitting' ? '登录中...' : '登录'}
+                </button>
+              </form>
+            ) : (
+              <form className="login-form" onSubmit={handleOTPLogin}>
+                <label className="field">
+                  <span>邮箱地址</span>
+                  <div className="field-box">
+                    <i>✉</i>
+                    <input
+                      type="text"
+                      placeholder="name@company.com"
+                      value={otpForm.email}
+                      onInput={(event) => {
+                        setOtpErrors((prev) => ({ ...prev, email: undefined }));
+                        setOtpForm((prev) => ({ ...prev, email: (event.target as HTMLInputElement).value }));
+                      }}
+                    />
+                  </div>
+                  {otpErrors.email ? <em>{otpErrors.email}</em> : null}
+                </label>
+
+                <button className="text-link send-code-link" type="button" disabled={otpCountdown > 0} onClick={handleSendOTPCode}>
+                  {otpCountdown > 0 ? `${otpCountdown}s 后重发` : '发送验证码'}
+                </button>
+
+                <label className="field">
+                  <span>验证码</span>
+                  <div className="field-box otp-box">
+                    <input
+                      type="text"
+                      maxLength={6}
+                      placeholder="000000"
+                      value={otpForm.code}
+                      onInput={(event) => {
+                        setOtpErrors((prev) => ({ ...prev, code: undefined }));
+                        setOtpForm((prev) => ({ ...prev, code: (event.target as HTMLInputElement).value.replace(/\D/g, '') }));
+                      }}
+                    />
+                  </div>
+                  {otpErrors.code ? <em>{otpErrors.code}</em> : null}
+                </label>
+
+                <button className="primary-button" type="submit" disabled={booting || submitState === 'submitting'}>
+                  {booting ? '加载中...' : submitState === 'submitting' ? '登录中...' : '登录'}
+                </button>
+              </form>
+            )}
+
+            {submitState !== 'idle' ? <div className={`status-note status-${submitState}`}>{message}</div> : null}
+          </div>
+        </section>
+      </section>
+      <div className="login-blur login-blur-top" />
+      <div className="login-blur login-blur-bottom" />
+    </main>
   );
 
-  const renderWorkspace = () => (
-    <section className="list-panel">
-      <div className="panel-head">
-        <div>
-          <p className="micro-label">Workspace</p>
-          <h3>空间与模块草图</h3>
-        </div>
-        <button className="secondary-button" type="button">新建空间</button>
-      </div>
-      <div className="workspace-stack">
-        {workspaceItems.map((item) => (
-          <article key={item.title}>
-            <div className="stack-head">
-              <strong>{item.title}</strong>
-              <span className="badge">{item.status}</span>
+  const renderAssistantBlocks = (blocks: ChatContentBlock[], streaming = false, animationBaseKey = '') => (
+    <>
+      {blocks.map((block, index) => {
+        const key = `${block.type}-${block.id || index}`;
+
+        if (block.type === 'text') {
+          const animationKey = animationBaseKey ? `${animationBaseKey}:${index}` : '';
+          const markdown = streaming && animationKey
+            ? animatedMarkdownByKey[animationKey] || ''
+            : getBlockText(block);
+
+          return (
+            <div
+              className={`chat-text markdown-body ${streaming ? 'chat-text-streaming' : ''}`}
+              dangerouslySetInnerHTML={{ __html: renderMarkdownHTML(markdown) }}
+              key={key}
+            />
+          );
+        }
+
+        if (block.type === 'thinking') {
+          return (
+            <details className="thinking-card" key={key}>
+              <summary>查看思考过程</summary>
+              <pre>{getBlockText(block)}</pre>
+            </details>
+          );
+        }
+
+        if (block.type === 'tool_use') {
+          return (
+            <div className="tool-card" key={key}>
+              <strong>工具调用：{block.name || block.id || '未命名工具'}</strong>
+              {block.input ? <pre>{formatToolInput(block.input)}</pre> : null}
             </div>
-            <p>{item.desc}</p>
+          );
+        }
+
+        return (
+          <div className="tool-card" key={key}>
+            <strong>内容块：{block.type || '未知类型'}</strong>
+            <pre>{formatToolInput(block)}</pre>
+          </div>
+        );
+      })}
+    </>
+  );
+
+  const renderChat = () => (
+    <>
+      <div className="workspace-scroll" ref={chatScrollRef}>
+        <section className="chat-header-card">
+          <div>
+            <span>当前会话</span>
+            <h2>{activeConversation?.title || '新对话'}</h2>
+            <p>{activeConversation ? `更新于 ${formatDateTime(activeConversation.updatedAt)}` : isSessionChecking ? '正在校验登录状态，请稍候。' : '开始一段新的真实对话。'}</p>
+          </div>
+          <div className="chat-header-actions">
+            <button className="outline-button" type="button" onClick={() => void createNewConversation()}>新建会话</button>
+            <button className="outline-button" type="button" onClick={() => void retryLastPrompt()} disabled={!latestUserMessage || isChatting}>重新回答</button>
+            <button className="outline-button" type="button" onClick={() => void stopCurrentStream()} disabled={!isChatting}>停止生成</button>
+          </div>
+        </section>
+
+        {chatMessages.length === 0 ? (
+          <section className="chat-welcome-card">
+            <span>已接入 {llmModel}</span>
+            <h2>开始一段真实对话</h2>
+            <p>{isSessionChecking ? '正在恢复本地会话并校验 token，有效后将直接进入工作区。' : '当前支持流式输出、复制消息、重新回答与本地持久化，关闭应用后也能继续查看历史会话。'}</p>
+          </section>
+        ) : null}
+
+        {chatMessages.map((item, index) => {
+          const text = getMessageText(item);
+          const isLastAssistant = item.role === 'assistant' && index === chatMessages.length - 1;
+          if (item.role === 'user') {
+            return (
+              <div className="chat-thread" key={`message-${index}`}>
+                <div className="chat-block user-block">
+                  <div className="user-message-shell">
+                    <div className="user-bubble">{text}</div>
+                    <div className="message-actions user-actions">
+                      <button type="button" onClick={() => void copyText(text)}>复制</button>
+                    </div>
+                  </div>
+                  <div className="user-avatar" />
+                </div>
+              </div>
+            );
+          }
+
+          return (
+            <div className="chat-thread" key={`message-${index}`}>
+              <div className="chat-block assistant-block">
+                <div className="chat-avatar assistant-avatar">☁</div>
+                <div className="chat-copy">
+                  <div className="assistant-headline">
+                    <p className="assistant-name">智能助手</p>
+                    <div className="message-actions">
+                      <button type="button" onClick={() => void copyText(text)} disabled={!text}>复制</button>
+                      <button type="button" onClick={() => void retryLastPrompt()} disabled={isChatting || !latestUserMessage || !isLastAssistant}>重试</button>
+                    </div>
+                  </div>
+                  {item.content.length > 0 ? renderAssistantBlocks(
+                    item.content,
+                    isChatting && isLastAssistant,
+                    activeConversation ? `${activeConversation.id}:${index}` : '',
+                  ) : (
+                    <div className="chat-text typing-text chat-text-streaming">
+                      <p className="typing-paragraph">正在生成回复，请稍候...</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="composer-shell">
+        <div className="composer-card">
+          <textarea
+            placeholder={isSessionChecking ? '正在校验登录状态...' : '请输入你的问题，Enter 发送，Shift + Enter 换行'}
+            value={composer}
+            onInput={(event) => setComposer((event.target as HTMLTextAreaElement).value)}
+            onKeyDown={(event) => {
+              void handleComposerKeyDown(event as KeyboardEvent);
+            }}
+            disabled={isSessionChecking}
+          />
+          <div className="composer-toolbar">
+            <div className="composer-actions">
+              <button type="button" disabled>
+                ⌁
+              </button>
+              <button type="button" disabled>
+                ◉
+              </button>
+              <span className="composer-divider" />
+              <button className="plugin-pill" type="button" disabled>
+                当前模型：{llmModel}
+              </button>
+            </div>
+            <div className="composer-submit-group">
+              {isChatting ? (
+                <button className="outline-button compact" type="button" onClick={() => void stopCurrentStream()}>
+                  停止
+                </button>
+              ) : null}
+              <button className="send-button" type="button" disabled={!canSendMessage} onClick={() => void sendChatMessage()}>
+                ➤
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  const renderLibrary = () => (
+    <div className="page-shell history-shell">
+      <header className="page-header">
+        <div>
+          <h1>历史对话</h1>
+          <p>管理本地持久化的聊天记录，支持打开、重命名和删除。</p>
+        </div>
+        <button className="outline-button" type="button" onClick={() => void createNewConversation()}>
+          新建会话
+        </button>
+      </header>
+
+      <div className="history-grid">
+        {conversations.length > 0 ? conversations.map((conversation) => {
+          const preview = getMessagePreview(conversation.messages.find((item) => item.role === 'assistant') || conversation.messages[0] || { role: 'user', content: [] });
+          const isEditing = editingConversationID === conversation.id;
+          return (
+            <article className="history-card" key={conversation.id}>
+              <div className="history-card-top">
+                <span>{formatDateTime(conversation.updatedAt)}</span>
+                <strong>{conversation.messages.length} 条消息</strong>
+              </div>
+              {isEditing ? (
+                <div className="history-edit-row">
+                  <input
+                    value={editingTitle}
+                    onInput={(event) => setEditingTitle((event.target as HTMLInputElement).value)}
+                    onKeyDown={(event) => {
+                      if ((event as KeyboardEvent).key === 'Enter') {
+                        void renameConversation(conversation.id, editingTitle);
+                      }
+                    }}
+                    autoFocus
+                  />
+                  <button type="button" onClick={() => void renameConversation(conversation.id, editingTitle)}>保存</button>
+                </div>
+              ) : (
+                <h3>{conversation.title}</h3>
+              )}
+              <p>{preview || '暂无内容'}</p>
+              <div className="history-card-actions">
+                <button type="button" onClick={() => openConversation(conversation.id)}>打开</button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingConversationID(conversation.id);
+                    setEditingTitle(conversation.title);
+                  }}
+                >
+                  重命名
+                </button>
+                <button type="button" onClick={() => void deleteConversation(conversation.id)}>删除</button>
+              </div>
+            </article>
+          );
+        }) : (
+          <section className="contribute-card">
+            <h2>还没有历史对话</h2>
+            <p>创建一段新会话后，聊天记录会自动保存在本地，并在这里集中管理。</p>
+          </section>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderPlugins = () => (
+    <div className="page-shell">
+      <header className="page-header">
+        <div>
+          <h1>插件中心</h1>
+          <p>管理已启用的集成，并扩展你的工作区能力。</p>
+        </div>
+      </header>
+
+      <section className="hero-plugin">
+        <div>
+          <span>当前工作区</span>
+          <h2>研究与执行栈</h2>
+          <p>当前工作区可以接入更多能力组件，用于资料整合、内容生成与自动化分析。</p>
+        </div>
+        <button className="primary-button compact" type="button">
+          添加插件
+        </button>
+      </section>
+
+      <div className="plugin-grid">
+        {plugins.map((plugin) => (
+          <article className="plugin-card" key={plugin.name}>
+            <div className="plugin-topline">
+              <h3>{plugin.name}</h3>
+              <span>{plugin.status}</span>
+            </div>
+            <p>{plugin.desc}</p>
+            <button className="outline-button" type="button">
+              {plugin.status === '已连接' ? '管理' : '连接'}
+            </button>
           </article>
         ))}
       </div>
-    </section>
+    </div>
   );
 
-  const renderTokens = () => (
-    <section className="list-panel">
-      <div className="panel-head">
-        <div>
-          <p className="micro-label">Session</p>
-          <h3>会话与 Token 管理</h3>
+  const renderSettings = () => {
+    const settingsGroups = [
+      {
+        title: '工作空间',
+        items: [`默认模型：${llmModel}`, '语言：中文', '主题：浅色'],
+      },
+      {
+        title: '通知',
+        items: ['桌面提醒已开启', '工作区提及汇总已开启', '错误上报已开启'],
+      },
+      {
+        title: '安全',
+        items: ['会话恢复已开启', 'Token 自动刷新已开启', '本地会话已加固'],
+      },
+    ];
+
+    return (
+      <div className="page-shell">
+        <header className="page-header">
+          <div>
+            <h1>设置</h1>
+            <p>管理你的工作区配置和个人偏好。</p>
+          </div>
+          <button className="outline-button" type="button" onClick={handleManualRefresh}>
+            {isRefreshing ? '刷新中...' : '刷新会话'}
+          </button>
+        </header>
+
+        <div className="settings-grid">
+          {settingsGroups.map((group) => (
+            <section className="settings-card" key={group.title}>
+              <h3>{group.title}</h3>
+              <ul>
+                {group.items.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </section>
+          ))}
         </div>
-        <button className="secondary-button" type="button" onClick={() => handleRefreshSession('manual')} disabled={isRefreshing}>
-          {isRefreshing ? '刷新中...' : '刷新 Token'}
-        </button>
       </div>
-      <div className="token-grid">
-        <article>
-          <span>Access Token</span>
-          <strong>{shortToken(loginResponse?.data?.accessToken)}</strong>
-        </article>
-        <article>
-          <span>Refresh Token</span>
-          <strong>{shortToken(loginResponse?.data?.refreshToken)}</strong>
-        </article>
-        <article>
-          <span>Access 过期时间</span>
-          <strong>{formatExpiry(loginResponse?.data?.expiresIn)}</strong>
-        </article>
-        <article>
-          <span>Refresh 过期时间</span>
-          <strong>{formatExpiry(loginResponse?.data?.refreshExpiresIn)}</strong>
-        </article>
-        <article>
-          <span>Session ID</span>
-          <strong>{loginResponse?.data?.sessionId || '未返回'}</strong>
-        </article>
-        <article>
-          <span>Scope</span>
-          <strong>{loginResponse?.data?.scope || '未返回'}</strong>
-        </article>
-      </div>
-    </section>
-  );
-
-  const renderAccount = () => (
-    <section className="list-panel">
-      <div className="panel-head">
-        <div>
-          <p className="micro-label">Account</p>
-          <h3>身份与安全面板</h3>
-        </div>
-        <button className="danger-button" type="button" onClick={handleLogout}>
-          退出登录
-        </button>
-      </div>
-      <div className="workspace-stack">
-        <article>
-          <strong>用户 ID</strong>
-          <p>{currentUser?.userId || '未返回'}</p>
-        </article>
-        <article>
-          <strong>账号</strong>
-          <p>{currentUser?.account || '未返回'}</p>
-        </article>
-        <article>
-          <strong>邮箱 / 手机</strong>
-          <p>{currentUser?.email || currentUser?.mobile || '未返回'}</p>
-        </article>
-        <article>
-          <strong>本地会话恢复</strong>
-          <p>{remember ? '已开启，启动时会优先恢复并校验服务端状态。' : '已关闭，退出后不会保存本地会话。'}</p>
-        </article>
-      </div>
-    </section>
-  );
-
-  const renderHomeContent = () => {
-    if (homeView === 'overview') {
-      return renderOverview();
-    }
-    if (homeView === 'workspace') {
-      return renderWorkspace();
-    }
-    if (homeView === 'tokens') {
-      return renderTokens();
-    }
-    return renderAccount();
+    );
   };
 
-  if (isLoggedIn) {
-    return (
-      <main className={`app-shell ${logoutAnimating ? 'app-shell-leaving' : ''}`}>
-        <aside className="sidebar">
-          <div>
-            <p className="sidebar-kicker">MuGuua AI</p>
-            <h1 className="sidebar-title">Workspace</h1>
-          </div>
-
-          <nav className="sidebar-nav" aria-label="主导航">
-            {sidebarItems.map((item) => (
-              <button
-                key={item.key}
-                className={`nav-item ${homeView === item.key ? 'nav-item-active' : ''}`}
-                type="button"
-                onClick={() => setHomeView(item.key)}
-              >
-                <span>{item.label}</span>
-                <small>{item.hint}</small>
-              </button>
-            ))}
-          </nav>
-
-          <div className="sidebar-footer">
-            <span>已登录用户</span>
-            <strong>{currentUser?.displayName || currentUser?.account}</strong>
-          </div>
-        </aside>
-
-        <section className="main-stage">
-          <header className="topbar">
-            <div>
-              <p className="micro-label">Now Viewing</p>
-              <h2>{sidebarItems.find((item) => item.key === homeView)?.label}</h2>
-            </div>
-            <div className="topbar-actions">
-              <button className="secondary-button" type="button" onClick={() => handleRefreshSession('manual')} disabled={isRefreshing}>
-                {isRefreshing ? '刷新中...' : '刷新 Token'}
-              </button>
-              <button className="danger-button" type="button" onClick={handleLogout}>
-                退出登录
-              </button>
-            </div>
-          </header>
-
-          <section className={`status-strip status-${submitState}`}>
-            <span>{message}</span>
-            <strong>{isRefreshing ? '自动刷新已启用' : currentUser?.email || currentUser?.mobile || currentUser?.account || '当前会话正常'}</strong>
-          </section>
-
-          <section className="content-stage">{renderHomeContent()}</section>
-        </section>
-      </main>
-    );
+  if (!isLoggedIn && !booting) {
+    return renderLogin();
   }
 
   return (
-    <main className="auth-shell">
-      <section className="hero-panel">
-        <div className="hero-background" style={{ backgroundImage: `url(${authBackground})` }} />
-      </section>
+    <main className="workspace-page">
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          <div className="brand-mark filled">☁</div>
+          <div>
+            <h1>MindNexus</h1>
+            <p>企业级 AI</p>
+          </div>
+        </div>
 
-      <section className="auth-panel">
-        <div className="auth-frame">
-          <h2>登录</h2>
+        <nav className="sidebar-nav">
+          <button
+            className="sidebar-link sidebar-link-active"
+            type="button"
+            onClick={() => {
+              void createNewConversation();
+            }}
+          >
+            <span>+</span>
+            <strong>新建会话</strong>
+          </button>
+        </nav>
 
-          <div className="auth-switcher" role="tablist" aria-label="认证方式切换">
-            {authViews.map((item) => (
+        <div className="recent-panel">
+          <h3>最近对话</h3>
+          {recentChats.length > 0 ? (
+            recentChats.map((item) => (
               <button
-                key={item.key}
-                className={`switch-chip ${authView === item.key ? 'switch-chip-active' : ''}`}
+                className={`recent-item ${item.id === activeConversationID ? 'recent-item-active' : ''}`}
+                key={item.id}
                 type="button"
-                onClick={() => {
-                  clearValidation();
-                  setAuthView(item.key);
-                }}
+                onClick={() => openConversation(item.id)}
               >
-                <span>{item.label}</span>
+                <span>◻</span>
+                <strong>{item.title}</strong>
               </button>
-            ))}
+            ))
+          ) : (
+            <p className="recent-empty">暂无最近对话</p>
+          )}
+        </div>
+
+        <div className="sidebar-footer">
+          {userMenuOpen ? (
+            <div className="sidebar-user-menu">
+              <button type="button" onClick={handleLogout}>
+                退出登录
+              </button>
+            </div>
+          ) : null}
+          <button
+            className="sidebar-user-trigger"
+            type="button"
+            aria-expanded={userMenuOpen}
+            onClick={() => setUserMenuOpen((open) => !open)}
+          >
+            <div className="user-chip-avatar" />
+            <strong>{currentUser?.displayName || currentUser?.account || '工作区'}</strong>
+          </button>
+        </div>
+      </aside>
+
+      <section className="workspace-main">
+        {isSessionChecking ? (
+          <div className="workspace-overlay" aria-live="polite">
+            <div className="workspace-overlay-card">
+              <strong>正在校验登录状态</strong>
+              <p>正在恢复本地会话并验证 token，有效后将直接进入首页。</p>
+            </div>
+          </div>
+        ) : null}
+        <header className="topbar">
+          <div className="topbar-title">
+            <span>当前对话</span>
+            <strong>{activeConversation?.title || '新对话'}</strong>
           </div>
 
-          {renderAuthForm()}
+        </header>
 
-          <section className={`status-card status-${submitState}`} aria-live="polite">
-            <p className="status-label">接口状态</p>
-            <p className="status-message">{booting ? '正在恢复本地会话...' : message}</p>
-            {(registerResponse?.data || loginResponse?.data?.user) ? (
-              <div className="result-grid compact-grid">
-                <div>
-                  <span>最近用户</span>
-                  <strong>
-                    {loginResponse?.data?.user?.displayName ||
-                      registerResponse?.data?.displayName ||
-                      loginResponse?.data?.user?.account ||
-                      registerResponse?.data?.account ||
-                      '未返回'}
-                  </strong>
-                </div>
-                <div>
-                  <span>Client ID</span>
-                  <strong>{clientId}</strong>
-                </div>
-              </div>
-            ) : null}
-          </section>
-
-          <footer className="panel-footer">
-            <span>MuGuua AI</span>
-          </footer>
-        </div>
+        {renderChat()}
       </section>
     </main>
   );

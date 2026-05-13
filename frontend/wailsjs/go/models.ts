@@ -16,6 +16,143 @@ export namespace main {
 	        this.uuid = source["uuid"];
 	    }
 	}
+	export class ChatContentBlock {
+	    type: string;
+	    text?: string;
+	    thinking?: string;
+	    signature?: string;
+	    id?: string;
+	    name?: string;
+	    input?: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatContentBlock(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.text = source["text"];
+	        this.thinking = source["thinking"];
+	        this.signature = source["signature"];
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.input = source["input"];
+	    }
+	}
+	export class ChatMessage {
+	    role: string;
+	    content: ChatContentBlock[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatMessage(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.role = source["role"];
+	        this.content = this.convertValues(source["content"], ChatContentBlock);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ChatConversation {
+	    id: string;
+	    title: string;
+	    createdAt: string;
+	    updatedAt: string;
+	    messages: ChatMessage[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatConversation(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	        this.messages = this.convertValues(source["messages"], ChatMessage);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class ChatResponse {
+	    id: string;
+	    type: string;
+	    role: string;
+	    model: string;
+	    content: ChatContentBlock[];
+	    stop_reason: string;
+	    stop_sequence: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.type = source["type"];
+	        this.role = source["role"];
+	        this.model = source["model"];
+	        this.content = this.convertValues(source["content"], ChatContentBlock);
+	        this.stop_reason = source["stop_reason"];
+	        this.stop_sequence = source["stop_sequence"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class MessageData {
 	    message: string;
 	
@@ -223,6 +360,8 @@ export namespace main {
 	
 	export class SessionState {
 	    remembered: boolean;
+	    createdAt?: string;
+	    expiresAt?: string;
 	    response?: OpenTokenResponse;
 	
 	    static createFrom(source: any = {}) {
@@ -232,6 +371,8 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.remembered = source["remembered"];
+	        this.createdAt = source["createdAt"];
+	        this.expiresAt = source["expiresAt"];
 	        this.response = this.convertValues(source["response"], OpenTokenResponse);
 	    }
 	
